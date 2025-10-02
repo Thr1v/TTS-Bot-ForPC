@@ -7,16 +7,17 @@ This enhanced TTS bot can automatically read notifications from log files or ema
 - **Text-to-Speech**: Convert text to speech with multiple voice options
 - **Auto-Reading**: Automatically read notifications from monitored sources
 - **Log File Monitoring**: Watch log files for new entries
-- **Email Monitoring**: Check for new emails and read them aloud
+- **Email Monitoring**: Check for new emails via PowerShell Outlook integration
 - **Audio Playback Controls**: Play, pause, stop, and rewind generated audio
 - **Voice Input**: Use speech recognition to input text
+- **Smart Signature Stripping**: Automatically removes email signatures and contact info
 
 ## Setup
 
 ### 1. Install Dependencies
 
 ```bash
-pip install pyttsx3 pygame gtts speechrecognition imapclient
+pip install pyttsx3 pygame gtts speechrecognition
 ```
 
 ### 2. Configure Notification Monitoring
@@ -34,20 +35,69 @@ log_files = system.log,application.log
 position_files = system.pos,application.pos
 
 [email_monitoring]
-enabled = false
-imap_server = imap.gmail.com
-email_address = your.email@gmail.com
-password = your_app_password
+enabled = true
+protocol = pop3
+server = outlook.office365.com
+port = 995
+email_address = your.email@outlook.com
+password = your_password
 check_interval = 300
-last_check_file = email_last_check.txt
 ```
 
-### 3. For Email Monitoring
+### 3. Email Monitoring Setup
 
-1. Enable 2-factor authentication on your email account
-2. Generate an app password (for Gmail: Settings > Security > App passwords)
-3. Use the app password in the config (not your regular password)
-4. Set `enabled = true` in the `[email_monitoring]` section
+The system uses PowerShell to directly monitor Outlook, bypassing network restrictions.
+
+#### Requirements
+- **Outlook must be installed** and running on your system
+- **PowerShell execution policy** should allow script running
+
+#### Quick Start
+1. **Configure email settings** in `notification_config.ini` (see above)
+2. **Run the Outlook monitor**:
+   ```powershell
+   .\outlook_monitor.ps1
+   ```
+3. **Start the TTS bot** with auto-reading enabled
+
+#### Manual Email Addition
+If automatic monitoring fails, you can manually add emails:
+
+```bash
+python add_email_gui.py
+```
+
+This opens a GUI where you can enter email details to be spoken by the TTS bot.
+
+### 4. What Gets Read
+
+The system extracts and speaks:
+- **Sender**: Name of the email sender
+- **Subject**: The email subject line
+- **Body**: The complete email content, with signatures and contact information automatically removed
+
+**Smart Signature Detection:**
+- Removes content after signature dashes (--)
+- Strips common closing phrases ("Best regards", "Sincerely", etc.)
+- Removes contact information and job titles
+- Preserves the full message content up to the signature
+
+### Testing Email Monitoring
+
+You can test the email monitoring by:
+
+1. Configuring your email settings in `notification_config.ini`
+2. Running `.\outlook_monitor.ps1` - it will start monitoring for new emails
+3. Sending yourself a test email
+4. The TTS bot will automatically read the email (with signature removed)
+
+### Troubleshooting
+
+- **Outlook COM error**: Make sure Outlook is installed and running
+- **No emails detected**: Check that Outlook has access to your inbox
+- **Signatures not removed**: The detection is heuristic - complex signatures may need manual adjustment
+- **PowerShell execution**: Run PowerShell as Administrator if you get execution policy errors
+- **Email connection fails**: Verify your email credentials in the config file
 
 ## Usage
 
@@ -57,18 +107,35 @@ last_check_file = email_last_check.txt
 python tts-bot.py
 ```
 
-### Running the Notification Monitor
+### Running the Email Monitor
 
-```bash
-python notification_monitor.py
+```powershell
+.\outlook_monitor.ps1
 ```
 
 ### Auto-Reading Setup
 
-1. Start both the TTS bot and notification monitor
-2. In the TTS bot, check "Enable Auto-Reading"
-3. Set the check interval (how often to look for new notifications)
-4. The bot will automatically speak new notifications as they arrive
+1. Start the TTS bot: `python tts-bot.py`
+2. Start the email monitor: `.\outlook_monitor.ps1`
+3. In the TTS bot, check "Enable Auto-Reading"
+4. Set the check interval (how often to look for new notifications)
+5. The bot will automatically speak new emails as they arrive
+
+### Manual Email Addition
+
+If you receive emails that the automatic monitor misses, you can add them manually:
+
+```bash
+python add_email_gui.py
+```
+
+This opens a GUI where you can enter:
+- Sender name
+- Email subject
+- Message content
+- Priority level
+
+The TTS bot will immediately speak the manually added email.
 
 ### Manual Notification Testing
 
@@ -82,19 +149,22 @@ monitor.add_notification("Test notification", source="manual")
 
 ## How It Works
 
-1. **Notification Monitor** watches log files and emails for new content
-2. When new content is found, it's written to `notification_queue.txt` as JSON
-3. **TTS Bot** periodically checks the queue file for new notifications
-4. Unread notifications are automatically spoken using the selected voice
-5. After speaking, notifications are marked as read
+1. **Outlook Monitor** (PowerShell) watches your Outlook inbox for unread emails
+2. When new emails are found, signatures are automatically stripped
+3. Email content is written to `notification_queue.txt` as JSON
+4. **TTS Bot** periodically checks the queue file for new notifications
+5. Unread notifications are automatically spoken using the selected voice
+6. After speaking, notifications are marked as read
 
 ## File Structure
 
 ```
 ├── tts-bot.py                 # Main TTS application
-├── notification_monitor.py    # Notification monitoring service
+├── outlook_monitor.ps1        # PowerShell Outlook monitoring service
+├── add_email_gui.py           # Manual email addition GUI
 ├── notification_config.ini    # Configuration file
 ├── notification_queue.txt     # Notification queue (auto-created)
+├── outlook_seen.txt          # Tracks processed emails (auto-created)
 └── README.md                  # This file
 ```
 
@@ -115,9 +185,12 @@ position_files = system.pos,app.pos
 ## Troubleshooting
 
 - **No voices available**: The bot falls back to online Google voices
-- **Email connection fails**: Check your app password and IMAP settings
-- **Log files not monitored**: Ensure file paths are correct and accessible
-- **Auto-reading not working**: Make sure both services are running
+- **Outlook COM error**: Make sure Outlook is installed and running
+- **No emails detected**: Check that Outlook has access to your inbox
+- **Signatures not removed**: The detection is heuristic - complex signatures may need manual adjustment
+- **PowerShell execution**: Run PowerShell as Administrator if you get execution policy errors
+- **Email connection fails**: Verify your email credentials in the config file
+- **Full email not read**: The system now reads complete emails and only cuts at signatures
 
 ## Security Note
 
