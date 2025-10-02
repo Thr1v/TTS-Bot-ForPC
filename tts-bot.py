@@ -236,12 +236,13 @@ class TTSApp:
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _load_voices(self, max_retries=3):
-        """Load voices with online voices as primary option"""
+        """Load both online and offline voices"""
         self._set_status("Loading voices…")
         
         voices_loaded = False
+        self.voices = []
         
-        # Always try to add online voices first (since they work reliably)
+        # Load online voices first (Google TTS)
         if GTTS_AVAILABLE:
             online_voices = [
                 {"name": "Google English (US)", "id": "en", "type": "online"},
@@ -257,57 +258,63 @@ class TTSApp:
                 {"name": "Google Chinese", "id": "zh", "type": "online"}
             ]
             
-            self.voices = online_voices
+            self.voices.extend(online_voices)
             voices_loaded = True
             self._set_status(f"Loaded {len(online_voices)} online voices.")
         
-        # Try pyttsx3 as secondary option (only if online voices failed)
-        if not voices_loaded:
-            for attempt in range(max_retries):
+        # Always try to add system voices (pyttsx3) as well
+        for attempt in range(max_retries):
+            try:
+                # Try pyttsx3 with careful error handling
                 try:
-                    # Try pyttsx3 with careful error handling
-                    try:
-                        import platform
-                        if platform.system() == "Windows":
-                            try:
-                                engine = pyttsx3.init('sapi5')
-                            except Exception:
-                                engine = pyttsx3.init()  # Fall back to auto-detect
-                        else:
-                            engine = pyttsx3.init()
-                        
-                        voices = engine.getProperty("voices")
-                        
-                        if voices and len(voices) > 0:
-                            self.voices = []
-                            for v in voices:
-                                try:
-                                    # Handle problematic voice objects more carefully
-                                    if hasattr(v, 'name') and v.name:
-                                        name = v.name
-                                    elif hasattr(v, 'id') and v.id:
-                                        name = v.id
-                                    else:
-                                        name = f"Voice {len(self.voices)}"
-                                    
-                                    # Safely get the ID
-                                    voice_id = getattr(v, 'id', name)
-                                    
-                                    self.voices.append({"name": name, "id": voice_id, "type": "offline"})
-                                except Exception:
-                                    continue
-                            
-                            if self.voices:
-                                voices_loaded = True
-                                engine.stop()
-                                self._set_status(f"Loaded {len(self.voices)} system voices.")
-                                break
+                    import platform
+                    if platform.system() == "Windows":
+                        try:
+                            engine = pyttsx3.init('sapi5')
+                        except Exception:
+                            engine = pyttsx3.init()  # Fall back to auto-detect
+                    else:
+                        engine = pyttsx3.init()
                     
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            import time
-                            time.sleep(1)
-                            continue
+                    voices = engine.getProperty("voices")
+                    
+                    if voices and len(voices) > 0:
+                        offline_count = 0
+                        for v in voices:
+                            try:
+                                # Handle problematic voice objects more carefully
+                                if hasattr(v, 'name') and v.name:
+                                    name = v.name
+                                elif hasattr(v, 'id') and v.id:
+                                    name = v.id
+                                else:
+                                    name = f"Voice {len(self.voices)}"
+                                
+                                # Safely get the ID
+                                voice_id = getattr(v, 'id', name)
+                                
+                                self.voices.append({"name": name, "id": voice_id, "type": "offline"})
+                                offline_count += 1
+                            except Exception:
+                                continue
+                        
+                        if offline_count > 0:
+                            voices_loaded = True
+                            engine.stop()
+                            self._set_status(f"Loaded {len(self.voices)} total voices ({len(online_voices) if 'online_voices' in locals() else 0} online, {offline_count} system).")
+                            break
+                
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(1)
+                        continue
+                    else:
+                        # If pyttsx3 fails but we have online voices, that's still good
+                        if self.voices:
+                            voices_loaded = True
+                            self._set_status(f"Loaded {len(self.voices)} voices (online only).")
+                            break
                         else:
                             # Last resort: create dummy voices
                             self.voices = [
@@ -316,10 +323,11 @@ class TTSApp:
                             voices_loaded = True
                             self._set_status("Using fallback voice (TTS engines unavailable).")
                             break
-                
-                except Exception:
-                    if attempt == max_retries - 1:
-                        # Last resort: create dummy voices
+            
+            except Exception:
+                if attempt == max_retries - 1:
+                    # If we have online voices, don't override with dummy
+                    if not self.voices:
                         self.voices = [
                             {"name": "Default Voice", "id": "default", "type": "offline"}
                         ]
