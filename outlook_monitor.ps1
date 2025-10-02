@@ -172,13 +172,10 @@ function Start-OutlookMonitor {
                     $subject = $item.Subject
                     if (!$subject) { $subject = "No Subject" }
 
-                    # Get body (first 200 chars) and strip signature
+                    # Get body and strip signature (no character limit)
                     $body = $item.Body
                     if ($body) {
                         $body = Strip-EmailSignature -Body $body
-                        if ($body.Length -gt 200) {
-                            $body = $body.Substring(0, 197) + "..."
-                        }
                     }
 
                     # Create notification message
