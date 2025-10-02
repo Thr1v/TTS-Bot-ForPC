@@ -151,47 +151,54 @@ function Start-OutlookMonitor {
 
     while ($true) {
         try {
-            # Get unread emails
-            $unreadItems = $inbox.Items | Where-Object { $_.Unread -eq $true }
+            # Get unread emails, sorted by received time (newest first)
+            $unreadItems = $inbox.Items | Where-Object { $_.Unread -eq $true } | Sort-Object ReceivedTime -Descending
 
             $newEmails = 0
-            foreach ($item in $unreadItems) {
+
+            # Only process the most recent unread email
+            if ($unreadItems -and $unreadItems.Count -gt 0) {
+                $item = $unreadItems[0]  # Most recent unread email
+
                 try {
                     $entryId = $item.EntryID
 
                     # Skip if already seen
                     if ($seenEmails.ContainsKey($entryId)) {
-                        continue
+                        # Email already processed, skip
                     }
+                    else {
+                        # Extract email details
+                        $sender = $item.SenderName
+                        if (!$sender) { $sender = $item.SenderEmailAddress }
+                        if (!$sender) { $sender = "Unknown Sender" }
 
-                    # Extract email details
-                    $sender = $item.SenderName
-                    if (!$sender) { $sender = $item.SenderEmailAddress }
-                    if (!$sender) { $sender = "Unknown Sender" }
+                        $subject = $item.Subject
+                        if (!$subject) { $subject = "No Subject" }
 
-                    $subject = $item.Subject
-                    if (!$subject) { $subject = "No Subject" }
+                        # Get body and strip signature (no character limit)
+                        $body = $item.Body
+                        if ($body) {
+                            $body = Strip-EmailSignature -Body $body
+                        }
 
-                    # Get body and strip signature (no character limit)
-                    $body = $item.Body
-                    if ($body) {
-                        $body = Strip-EmailSignature -Body $body
+                        # Create notification message
+                        $message = "New email from $sender`: $subject"
+                        if ($body -and $body.Trim()) {
+                            $message += " - $($body.Trim())"
+                        }
+
+                        # Add to queue
+                        Add-Notification -Message $message -Source "email"
+
+                        # Mark as seen
+                        $seenEmails[$entryId] = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
+
+                        $newEmails++
+                        $emailCount++
+
+                        Write-Host "Processed most recent unread email from $sender"
                     }
-
-                    # Create notification message
-                    $message = "New email from $sender`: $subject"
-                    if ($body -and $body.Trim()) {
-                        $message += " - $($body.Trim())"
-                    }
-
-                    # Add to queue
-                    Add-Notification -Message $message -Source "email"
-
-                    # Mark as seen
-                    $seenEmails[$entryId] = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
-
-                    $newEmails++
-                    $emailCount++
 
                 }
                 catch {
