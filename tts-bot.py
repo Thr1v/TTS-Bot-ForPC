@@ -7,6 +7,9 @@ import threading
 import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import time
+import json
+from pathlib import Path
 
 import pyttsx3
 import pygame
@@ -41,6 +44,14 @@ class TTSApp:
         self.is_speaking_live = False
         self.tts_engine = "pyttsx3"  # Default to offline
         self.conversation_history = []  # For conversational mode
+
+        # Auto-reading state
+        self.auto_reading_enabled = tk.BooleanVar(value=False)
+        self.auto_reading_interval = tk.IntVar(value=10)  # seconds
+        self.notification_queue = "notification_queue.txt"
+        self.last_notification_check = 0
+        self.auto_reading_thread = None
+        self.auto_reading_active = False
 
         # Init pygame mixer for playback
         pygame.mixer.init()
@@ -83,6 +94,29 @@ class TTSApp:
         self.volume_scale.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
 
         rv_frame.columnconfigure(1, weight=1)
+
+        # Auto-reading controls
+        auto_frame = ttk.LabelFrame(parent, text="Auto-Reading")
+        auto_frame.pack(fill="x", **pad)
+
+        self.auto_read_check = ttk.Checkbutton(auto_frame, text="Enable Auto-Reading",
+                                               variable=self.auto_reading_enabled,
+                                               command=self._toggle_auto_reading)
+        self.auto_read_check.pack(side="left", padx=10, pady=10)
+
+        ttk.Label(auto_frame, text="Check every").pack(side="left", padx=(10,5), pady=10)
+        self.interval_spin = ttk.Spinbox(auto_frame, from_=5, to=300, textvariable=self.auto_reading_interval,
+                                        width=5, command=self._update_auto_reading_interval)
+        self.interval_spin.pack(side="left", padx=(0,5), pady=10)
+        ttk.Label(auto_frame, text="seconds").pack(side="left", padx=(0,10), pady=10)
+
+        self.clear_notifications_btn = ttk.Button(auto_frame, text="Clear Notifications",
+                                                 command=self._clear_notifications)
+        self.clear_notifications_btn.pack(side="right", padx=10, pady=10)
+
+        self.play_last_btn = ttk.Button(auto_frame, text="Play Last Notification",
+                                       command=self._play_last_notification)
+        self.play_last_btn.pack(side="right", padx=(0, 10), pady=10)
 
         # File selection
         file_frame = ttk.LabelFrame(parent, text="Text Input")
@@ -520,6 +554,201 @@ class TTSApp:
         for btn in (self.play_btn, self.pause_btn, self.unpause_btn, self.stop_btn, self.rewind_btn):
             btn.config(state=state)
 
+    # ---------- Auto-Reading Methods ----------
+    def _toggle_auto_reading(self):
+        """Enable or disable auto-reading of notifications"""
+        if self.auto_reading_enabled.get():
+            self._start_auto_reading()
+        else:
+            self._stop_auto_reading()
+
+    def _update_auto_reading_interval(self):
+        """Update the auto-reading check interval"""
+        if self.auto_reading_active:
+            self._stop_auto_reading()
+            self._start_auto_reading()
+
+    def _start_auto_reading(self):
+        """Start the auto-reading thread"""
+        if self.auto_reading_active:
+            return
+
+        self.auto_reading_active = True
+        self.auto_reading_thread = threading.Thread(target=self._auto_reading_worker, daemon=True)
+        self.auto_reading_thread.start()
+        self._set_status(f"Auto-reading enabled (checking every {self.auto_reading_interval.get()}s)")
+
+    def _stop_auto_reading(self):
+        """Stop the auto-reading thread"""
+        self.auto_reading_active = False
+        if self.auto_reading_thread:
+            self.auto_reading_thread.join(timeout=2)
+        self._set_status("Auto-reading disabled")
+
+    def _auto_reading_worker(self):
+        """Background worker for auto-reading notifications"""
+        while self.auto_reading_active:
+            try:
+                self._check_notifications()
+            except Exception as e:
+                print(f"Auto-reading error: {e}")
+            time.sleep(self.auto_reading_interval.get())
+
+    def _check_notifications(self):
+        """Check for new notifications and speak them"""
+        if not os.path.exists(self.notification_queue):
+            return
+
+        try:
+            notifications = []
+            with open(self.notification_queue, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            notification = json.loads(line)
+                            if not notification.get('spoken', False):
+                                notifications.append(notification)
+                        except json.JSONDecodeError:
+                            continue
+
+            # Speak new notifications
+            for notification in notifications:
+                if not self.auto_reading_active:  # Check if we should stop
+                    break
+
+                message = notification['message']
+                source = notification.get('source', 'unknown')
+                priority = notification.get('priority', 'normal')
+
+                # Add source prefix for context
+                if source.startswith('log:'):
+                    prefix = f"Log update: "
+                elif source == 'email':
+                    prefix = f"Email: "
+                else:
+                    prefix = f"Notification: "
+
+                full_message = f"{prefix}{message}"
+
+                # Speak the notification
+                self._speak_text_live(full_message)
+
+                # Mark as spoken
+                notification['spoken'] = True
+                self._update_notification_status(notification)
+
+                # Brief pause between notifications
+                if self.auto_reading_active:
+                    time.sleep(2)
+
+        except Exception as e:
+            print(f"Error checking notifications: {e}")
+
+    def _update_notification_status(self, notification):
+        """Update a notification's spoken status in the queue file"""
+        try:
+            # Read all notifications
+            notifications = []
+            if os.path.exists(self.notification_queue):
+                with open(self.notification_queue, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                notif = json.loads(line)
+                                # Update the matching notification
+                                if (notif.get('timestamp') == notification.get('timestamp') and
+                                    notif.get('message') == notification.get('message')):
+                                    notif['spoken'] = True
+                                notifications.append(notif)
+                            except json.JSONDecodeError:
+                                continue
+
+            # Write back all notifications
+            with open(self.notification_queue, 'w', encoding='utf-8') as f:
+                for notif in notifications:
+                    f.write(json.dumps(notif) + '\n')
+
+        except Exception as e:
+            print(f"Error updating notification status: {e}")
+
+    def _clear_notifications(self):
+        """Clear all notifications from the queue"""
+        try:
+            if os.path.exists(self.notification_queue):
+                # Create backup
+                backup_name = f"{self.notification_queue}.backup"
+                if os.path.exists(backup_name):
+                    os.remove(backup_name)
+                os.rename(self.notification_queue, backup_name)
+
+            # Create empty queue
+            Path(self.notification_queue).touch()
+            self._set_status("Notifications cleared (backup created)")
+
+        except Exception as e:
+            self._set_status(f"Error clearing notifications: {e}")
+
+    def _speak_text_live(self, text):
+        """Speak text directly without saving to file"""
+        if not text.strip():
+            return
+
+        try:
+            self.is_speaking_live = True
+            self._set_status("Speaking...")
+
+            # Find the selected voice
+            selected_voice = None
+            if self.selected_voice_id:
+                for voice in self.voices:
+                    if voice['id'] == self.selected_voice_id:
+                        selected_voice = voice
+                        break
+
+            if selected_voice and selected_voice['type'] == 'online':
+                # Use Google TTS
+                tts = gTTS(text=text, lang=selected_voice['id'], slow=False)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_file:
+                    temp_file_path = temp_file.name
+                    tts.save(temp_file_path)
+
+                # Play the audio
+                pygame.mixer.music.load(temp_file_path)
+                pygame.mixer.music.play()
+
+                # Wait for playback to finish
+                while pygame.mixer.music.get_busy() and self.is_speaking_live:
+                    pygame.time.wait(100)
+
+                # Clean up
+                try:
+                    os.unlink(temp_file_path)
+                except:
+                    pass
+
+            else:
+                # Use pyttsx3 (fallback)
+                engine = pyttsx3.init()
+                if selected_voice:
+                    try:
+                        engine.setProperty('voice', selected_voice['id'])
+                    except:
+                        pass
+
+                engine.setProperty('rate', self.rate_var.get())
+                engine.setProperty('volume', self.volume_var.get())
+                engine.say(text)
+                engine.runAndWait()
+
+            self._set_status("Speech completed.")
+
+        except Exception as e:
+            self._set_status(f"Speech error: {e}")
+        finally:
+            self.is_speaking_live = False
+
     # ---------- Helpers ----------
     def _set_status(self, msg: str):
         self.status_var.set(msg)
@@ -531,6 +760,57 @@ class TTSApp:
         except Exception:
             pass
         self.master.destroy()
+
+    def _get_last_notification(self):
+        """Get the most recent notification from the queue"""
+        if not os.path.exists(self.notification_queue):
+            return None
+
+        try:
+            notifications = []
+            with open(self.notification_queue, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            notification = json.loads(line)
+                            notifications.append(notification)
+                        except json.JSONDecodeError:
+                            continue
+
+            if notifications:
+                # Return the most recent notification (last in file)
+                return notifications[-1]
+            return None
+
+        except Exception as e:
+            print(f"Error reading last notification: {e}")
+            return None
+
+    def _play_last_notification(self):
+        """Play the most recent notification"""
+        last_notif = self._get_last_notification()
+        if not last_notif:
+            self._set_status("No notifications found")
+            messagebox.showinfo("No Notifications", "There are no notifications in the queue.")
+            return
+
+        message = last_notif['message']
+        source = last_notif.get('source', 'unknown')
+
+        # Add source prefix for context
+        if source.startswith('log:'):
+            prefix = "Log update: "
+        elif source == 'email':
+            prefix = "Email: "
+        else:
+            prefix = "Notification: "
+
+        full_message = f"{prefix}{message}"
+
+        # Speak the notification
+        self._set_status(f"Speaking last notification: {message[:50]}...")
+        self._speak_text_live(full_message)
 
 
 def main():
