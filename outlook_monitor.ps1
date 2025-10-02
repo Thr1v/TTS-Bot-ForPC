@@ -1,5 +1,5 @@
 param(
-    [int]$CheckInterval = 10,  # Check every 10 seconds instead of 30
+    [int]$CheckInterval = 5,  # Check every 5 seconds for faster response
     [string]$QueueFile = "C:\bots\notification_queue.txt"  # Absolute path
 )
 
@@ -12,16 +12,13 @@ function Strip-EmailSignature {
     # Split into lines
     $lines = $Body -split "`r?`n"
 
-    # If email is short, return as-is
+    # If email is very short, return as-is
     if ($lines.Count -lt 3) {
         return $Body.Trim()
     }
 
-    # Only check the last 10 lines for signatures (signatures are usually at the end)
-    $checkLines = $lines.Count
-    if ($checkLines -gt 10) {
-        $checkLines = 10
-    }
+    # Check the last 10 lines for signatures (signatures are usually at the end)
+    $checkLines = [Math]::Min($lines.Count, 10)
 
     $signatureStartIndex = -1
 
@@ -151,14 +148,23 @@ function Start-OutlookMonitor {
 
     while ($true) {
         try {
-            # Get unread emails, sorted by received time (newest first)
-            $unreadItems = $inbox.Items | Where-Object { $_.Unread -eq $true } | Sort-Object ReceivedTime -Descending
+            # Get only the most recent unread email (optimized - no need to get all unread)
+            $mostRecentUnread = $null
+            $maxReceivedTime = [DateTime]::MinValue
+
+            # Find the most recent unread email efficiently
+            foreach ($item in $inbox.Items) {
+                if ($item.Unread -and $item.ReceivedTime -gt $maxReceivedTime) {
+                    $mostRecentUnread = $item
+                    $maxReceivedTime = $item.ReceivedTime
+                }
+            }
 
             $newEmails = 0
 
-            # Only process the most recent unread email
-            if ($unreadItems -and $unreadItems.Count -gt 0) {
-                $item = $unreadItems[0]  # Most recent unread email
+            # Process only the most recent unread email
+            if ($mostRecentUnread) {
+                $item = $mostRecentUnread
 
                 try {
                     $entryId = $item.EntryID
@@ -210,10 +216,11 @@ function Start-OutlookMonitor {
                 Write-Host "Processed $newEmails new emails (total: $emailCount)"
             }
 
-            # Save seen emails periodically
-            if ($emailCount % 5 -eq 0 -and $emailCount -gt 0) {
+            # Save seen emails less frequently (every 20 emails instead of 10, or when count changes significantly)
+            if (($emailCount % 20 -eq 0 -and $emailCount -gt 0) -or ($seenEmails.Count -gt 0 -and $seenEmails.Count % 50 -eq 0)) {
                 try {
-                    $seenEmails | ConvertTo-Json | Set-Content $seenFile -Encoding UTF8 -Force
+                    $seenEmails | ConvertTo-Json -Compress | Set-Content $seenFile -Encoding UTF8 -Force
+                    Write-Host "Saved $($seenEmails.Count) seen emails to disk"
                 }
                 catch {
                     Write-Warning "Could not save seen emails: $_"
