@@ -1,7 +1,31 @@
 param(
-    [int]$CheckInterval = 5,  # Check every 5 seconds for faster response
-    [string]$QueueFile = "C:\bots\notification_queue.txt"  # Absolute path
+    [int]$CheckInterval = 5,
+    [string]$QueueFile = "C:\bots\notification_queue.txt"
 )
+
+# Function to strip hyperlinks/URLs from email body
+function Strip-Urls {
+    param([string]$Body)
+
+    if (!$Body) { return "" }
+
+    # Remove common URL patterns
+    $urlPatterns = @(
+        'https?://[^\s]+',
+        'www\.[^\s]+',
+        '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+        '[A-Za-z]:\\[^\s]*',
+        '\\\\[^\s]+'
+    )
+
+    $result = $Body
+
+    foreach ($pattern in $urlPatterns) {
+        $result = $result -replace $pattern, '[link removed]'
+    }
+
+    return $result
+}
 
 # Function to strip email signatures
 function Strip-EmailSignature {
@@ -9,49 +33,34 @@ function Strip-EmailSignature {
 
     if (!$Body) { return "" }
 
-    # Split into lines
     $lines = $Body -split "`r?`n"
 
-    # If email is very short, return as-is
     if ($lines.Count -lt 3) {
         return $Body.Trim()
     }
 
-    # Check the last 10 lines for signatures (signatures are usually at the end)
     $checkLines = [Math]::Min($lines.Count, 10)
-
     $signatureStartIndex = -1
 
-    # Check last few lines for signature patterns
     for ($i = $lines.Count - $checkLines; $i -lt $lines.Count; $i++) {
         $line = $lines[$i].Trim()
 
-        # Skip empty lines
         if ([string]::IsNullOrWhiteSpace($line)) {
             continue
         }
 
-        # Check for signature indicators
         $isSignature = $false
 
-        # Check for signature dashes (most reliable indicator)
-        if ($line -match "^[-—_]{2,}$") {
+        if ($line -match "^[-_]{2,}$") {
             $isSignature = $true
         }
-
-        # Check for signature keywords (case insensitive, whole words)
         elseif ($line -match "(?i)\b(best regards|regards|sincerely|thank you|thanks|kind regards|warm regards|yours sincerely|yours truly|cheers|best wishes|with best wishes|cordially|looking forward|sent from|on behalf of)\b") {
             $isSignature = $true
         }
-
-        # Check for contact info patterns (more specific)
         elseif ($line -match "(?i)\b(phone|tel|mobile|fax|email|www\.|\.com|\.org|\.net)\b.*[:=]") {
             $isSignature = $true
         }
-
-        # Check for job titles followed by company info
         elseif ($line -match "(?i)\b(director|manager|coordinator|specialist|analyst|administrator|officer|president|ceo|cto|cfo)\b") {
-            # Only consider it a signature if it's in the last 3 lines
             if ($i -ge $lines.Count - 3) {
                 $isSignature = $true
             }
@@ -63,19 +72,14 @@ function Strip-EmailSignature {
         }
     }
 
-    # If we found a signature, return content before it
     if ($signatureStartIndex -ge 0) {
         $contentLines = $lines[0..($signatureStartIndex - 1)]
     }
     else {
-        # No signature found, return all content
         $contentLines = $lines
     }
 
-    # Join the lines back
     $result = $contentLines -join " "
-
-    # Clean up extra whitespace
     $result = $result -replace "\s+", " "
     $result = $result.Trim()
 
@@ -107,11 +111,10 @@ function Start-OutlookMonitor {
     Write-Host "Check interval: $CheckInterval seconds"
     Write-Host "Press Ctrl+C to stop"
 
-    # Try to connect to Outlook
     try {
         $outlook = New-Object -ComObject Outlook.Application
         $namespace = $outlook.GetNamespace("MAPI")
-        $inbox = $namespace.GetDefaultFolder(6)  # 6 = Inbox
+        $inbox = $namespace.GetDefaultFolder(6)
 
         Write-Host "Connected to Outlook successfully"
     }
@@ -122,15 +125,12 @@ function Start-OutlookMonitor {
         return
     }
 
-    # Track seen emails
     $seenEmails = @{}
-
-    # Load previously seen emails
     $seenFile = "C:\bots\outlook_seen.txt"
+    
     if (Test-Path $seenFile) {
         try {
             $loaded = Get-Content $seenFile | ConvertFrom-Json
-            # Convert PSCustomObject back to hashtable
             if ($loaded) {
                 foreach ($property in $loaded.PSObject.Properties) {
                     $seenEmails[$property.Name] = $property.Value
@@ -148,11 +148,9 @@ function Start-OutlookMonitor {
 
     while ($true) {
         try {
-            # Get only the most recent unread email (optimized - no need to get all unread)
             $mostRecentUnread = $null
             $maxReceivedTime = [DateTime]::MinValue
 
-            # Find the most recent unread email efficiently
             foreach ($item in $inbox.Items) {
                 if ($item.Unread -and $item.ReceivedTime -gt $maxReceivedTime) {
                     $mostRecentUnread = $item
@@ -162,49 +160,54 @@ function Start-OutlookMonitor {
 
             $newEmails = 0
 
-            # Process only the most recent unread email
             if ($mostRecentUnread) {
                 $item = $mostRecentUnread
 
                 try {
                     $entryId = $item.EntryID
-
-                    # Skip if already seen
-                    if ($seenEmails.ContainsKey($entryId)) {
-                        # Email already processed, skip
-                    }
-                    else {
-                        # Extract email details
+                    
+                    if ([string]::IsNullOrEmpty($entryId)) {
                         $sender = $item.SenderName
                         if (!$sender) { $sender = $item.SenderEmailAddress }
-                        if (!$sender) { $sender = "Unknown Sender" }
-
+                        if (!$sender) { $sender = "Unknown" }
+                        
                         $subject = $item.Subject
                         if (!$subject) { $subject = "No Subject" }
-
-                        # Get body and strip signature (no character limit)
-                        $body = $item.Body
-                        if ($body) {
-                            $body = Strip-EmailSignature -Body $body
-                        }
-
-                        # Create notification message
-                        $message = "New email from $sender`: $subject"
-                        if ($body -and $body.Trim()) {
-                            $message += " - $($body.Trim())"
-                        }
-
-                        # Add to queue
-                        Add-Notification -Message $message -Source "email"
-
-                        # Mark as seen
-                        $seenEmails[$entryId] = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
-
-                        $newEmails++
-                        $emailCount++
-
-                        Write-Host "Processed most recent unread email from $sender"
+                        
+                        $entryId = "$sender|$subject|$($item.ReceivedTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+                        Write-Warning "Using composite key for email without EntryID: $entryId"
                     }
+
+                    if ($seenEmails.ContainsKey($entryId)) {
+                        continue
+                    }
+
+                    $sender = $item.SenderName
+                    if (!$sender) { $sender = $item.SenderEmailAddress }
+                    if (!$sender) { $sender = "Unknown Sender" }
+
+                    $subject = $item.Subject
+                    if (!$subject) { $subject = "No Subject" }
+
+                    $body = $item.Body
+                    if ($body) {
+                        $body = Strip-Urls -Body $body
+                        $body = Strip-EmailSignature -Body $body
+                    }
+
+                    $message = "New email from $sender`: $subject"
+                    if ($body -and $body.Trim()) {
+                        $message += " - $($body.Trim())"
+                    }
+
+                    Add-Notification -Message $message -Source "email"
+
+                    $seenEmails[$entryId] = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
+
+                    $newEmails++
+                    $emailCount++
+
+                    Write-Host "Processed most recent unread email from $sender"
 
                 }
                 catch {
@@ -216,7 +219,6 @@ function Start-OutlookMonitor {
                 Write-Host "Processed $newEmails new emails (total: $emailCount)"
             }
 
-            # Save seen emails less frequently (every 20 emails instead of 10, or when count changes significantly)
             if (($emailCount % 20 -eq 0 -and $emailCount -gt 0) -or ($seenEmails.Count -gt 0 -and $seenEmails.Count % 50 -eq 0)) {
                 try {
                     $seenEmails | ConvertTo-Json -Compress | Set-Content $seenFile -Encoding UTF8 -Force
@@ -232,7 +234,6 @@ function Start-OutlookMonitor {
             Write-Warning "Error checking emails: $_"
         }
 
-        # Wait before next check
         Start-Sleep -Seconds $CheckInterval
     }
 }
