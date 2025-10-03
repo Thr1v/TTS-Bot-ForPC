@@ -44,6 +44,7 @@ class TTSApp:
         self.is_speaking_live = False
         self.tts_engine = "pyttsx3"  # Default to offline
         self.conversation_history = []  # For conversational mode
+        self.stop_speech_flag = False  # Flag to stop current speech
 
         # Auto-reading state
         self.auto_reading_enabled = tk.BooleanVar(value=False)
@@ -150,6 +151,9 @@ class TTSApp:
         self.generate_btn = ttk.Button(action_frame, text="Generate Audio", command=self._generate_audio)
         self.generate_btn.pack(side="left", padx=10, pady=10)
 
+        self.skip_btn = ttk.Button(action_frame, text="Skip/Stop Speech", command=self._skip_speech)
+        self.skip_btn.pack(side="left", padx=10, pady=10)
+
         self.status_var = tk.StringVar(value="Ready.")
         self.status_lbl = ttk.Label(parent, textvariable=self.status_var, foreground="#555")
         self.status_lbl.pack(fill="x", padx=12)
@@ -169,9 +173,24 @@ class TTSApp:
 
         # Footer note
         note = ttk.Label(parent, text="Tip: Use \"Generate Audio\" to create a file you can replay with the controls.\n"
-                                       "Speak Live uses the voice directly without saving a file.",
+                                       "Speak Live uses the voice directly without saving a file.\n"
+                                       "Use \"Skip/Stop Speech\" to interrupt current playback (including auto-reading).",
                          foreground="#666", justify="left")
         note.pack(fill="x", padx=12, pady=(0, 10))
+
+    def _skip_speech(self):
+        """Stop current speech playback"""
+        self.stop_speech_flag = True
+        self.is_speaking_live = False
+        
+        # Stop pygame mixer if playing
+        try:
+            if pygame.mixer.music.get_busy():
+                pygame.mixer.music.stop()
+        except:
+            pass
+            
+        self._set_status("Speech stopped by user")
 
     def _voice_input(self):
         """Capture speech input and add to text area"""
@@ -609,20 +628,35 @@ class TTSApp:
 
         try:
             notifications = []
-            with open(self.notification_queue, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            notification = json.loads(line)
-                            if not notification.get('spoken', False):
-                                notifications.append(notification)
-                        except json.JSONDecodeError:
-                            continue
+            # Try different encodings in case the file has encoding issues
+            encodings_to_try = ['utf-8', 'utf-16', 'utf-16-le', 'utf-16-be', 'latin-1']
+            
+            content = None
+            for encoding in encodings_to_try:
+                try:
+                    with open(self.notification_queue, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                print(f"Could not decode notification file with any known encoding")
+                return
+            
+            for line in content.splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        notification = json.loads(line)
+                        if not notification.get('spoken', False):
+                            notifications.append(notification)
+                    except json.JSONDecodeError:
+                        continue
 
             # Speak new notifications
             for notification in notifications:
-                if not self.auto_reading_active:  # Check if we should stop
+                if not self.auto_reading_active or self.stop_speech_flag:  # Check if we should stop
                     break
 
                 message = notification['message']
@@ -642,12 +676,16 @@ class TTSApp:
                 # Speak the notification
                 self._speak_text_live(full_message)
 
+                # Check if speech was interrupted
+                if self.stop_speech_flag:
+                    break
+
                 # Mark as spoken
                 notification['spoken'] = True
                 self._update_notification_status(notification)
 
                 # Brief pause between notifications
-                if self.auto_reading_active:
+                if self.auto_reading_active and not self.stop_speech_flag:
                     time.sleep(2)
 
         except Exception as e:
@@ -656,24 +694,40 @@ class TTSApp:
     def _update_notification_status(self, notification):
         """Update a notification's spoken status in the queue file"""
         try:
+            # Try different encodings to read the file
+            encodings_to_try = ['utf-8', 'utf-16', 'utf-16-le', 'utf-16-be', 'latin-1']
+            
+            content = None
+            encoding_used = None
+            for encoding in encodings_to_try:
+                try:
+                    with open(self.notification_queue, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    encoding_used = encoding
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                print(f"Could not decode notification file with any known encoding")
+                return
+            
             # Read all notifications
             notifications = []
-            if os.path.exists(self.notification_queue):
-                with open(self.notification_queue, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            try:
-                                notif = json.loads(line)
-                                # Update the matching notification
-                                if (notif.get('timestamp') == notification.get('timestamp') and
-                                    notif.get('message') == notification.get('message')):
-                                    notif['spoken'] = True
-                                notifications.append(notif)
-                            except json.JSONDecodeError:
-                                continue
+            for line in content.splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        notif = json.loads(line)
+                        # Update the matching notification
+                        if (notif.get('timestamp') == notification.get('timestamp') and
+                            notif.get('message') == notification.get('message')):
+                            notif['spoken'] = True
+                        notifications.append(notif)
+                    except json.JSONDecodeError:
+                        continue
 
-            # Write back all notifications
+            # Write back all notifications with UTF-8 encoding
             with open(self.notification_queue, 'w', encoding='utf-8') as f:
                 for notif in notifications:
                     f.write(json.dumps(notif) + '\n')
@@ -705,6 +759,7 @@ class TTSApp:
 
         try:
             self.is_speaking_live = True
+            self.stop_speech_flag = False  # Reset stop flag
             self._set_status("Speaking...")
 
             # Find the selected voice
@@ -727,8 +782,12 @@ class TTSApp:
                 pygame.mixer.music.play()
 
                 # Wait for playback to finish
-                while pygame.mixer.music.get_busy() and self.is_speaking_live:
+                while pygame.mixer.music.get_busy() and self.is_speaking_live and not self.stop_speech_flag:
                     pygame.time.wait(100)
+
+                # Stop if interrupted
+                if self.stop_speech_flag:
+                    pygame.mixer.music.stop()
 
                 # Clean up
                 try:
@@ -737,25 +796,30 @@ class TTSApp:
                     pass
 
             else:
-                # Use pyttsx3 (fallback)
-                engine = pyttsx3.init()
-                if selected_voice:
-                    try:
-                        engine.setProperty('voice', selected_voice['id'])
-                    except:
-                        pass
+                # Use pyttsx3 (fallback) - check for stop flag
+                if not self.stop_speech_flag:
+                    engine = pyttsx3.init()
+                    if selected_voice:
+                        try:
+                            engine.setProperty('voice', selected_voice['id'])
+                        except:
+                            pass
 
-                engine.setProperty('rate', self.rate_var.get())
-                engine.setProperty('volume', self.volume_var.get())
-                engine.say(text)
-                engine.runAndWait()
+                    engine.setProperty('rate', self.rate_var.get())
+                    engine.setProperty('volume', self.volume_var.get())
+                    engine.say(text)
+                    engine.runAndWait()
 
-            self._set_status("Speech completed.")
+            if self.stop_speech_flag:
+                self._set_status("Speech interrupted")
+            else:
+                self._set_status("Speech completed.")
 
         except Exception as e:
             self._set_status(f"Speech error: {e}")
         finally:
             self.is_speaking_live = False
+            self.stop_speech_flag = False
 
     # ---------- Helpers ----------
     def _set_status(self, msg: str):
@@ -775,16 +839,31 @@ class TTSApp:
             return None
 
         try:
+            # Try different encodings to read the file
+            encodings_to_try = ['utf-8', 'utf-16', 'utf-16-le', 'utf-16-be', 'latin-1']
+            
+            content = None
+            for encoding in encodings_to_try:
+                try:
+                    with open(self.notification_queue, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                print(f"Could not decode notification file with any known encoding")
+                return None
+            
             notifications = []
-            with open(self.notification_queue, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            notification = json.loads(line)
-                            notifications.append(notification)
-                        except json.JSONDecodeError:
-                            continue
+            for line in content.splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        notification = json.loads(line)
+                        notifications.append(notification)
+                    except json.JSONDecodeError:
+                        continue
 
             if notifications:
                 # Return the most recent notification (last in file)
@@ -816,9 +895,9 @@ class TTSApp:
 
         full_message = f"{prefix}{message}"
 
-        # Speak the notification
+        # Speak the notification in a separate thread to avoid blocking UI
         self._set_status(f"Speaking last notification: {message[:50]}...")
-        self._speak_text_live(full_message)
+        threading.Thread(target=self._speak_text_live, args=(full_message,), daemon=True).start()
 
 
 def main():
